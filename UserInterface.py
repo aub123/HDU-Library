@@ -60,14 +60,23 @@ class UserInterface:
     def run(self):
         self.init()
         state = self.login()
+    
         if len(self.master.plans) == 0:
             print("初始化预约方案...")
-            if self.addPlan():
-                self.master.saveConfig()
-                print("预约方案初始化成功")
+            attempts = 0
+            
+            while attempts < 3:  # Retry up to five times
+                if self.addPlan():
+                    self.master.saveConfig()
+                    print("预约方案初始化成功")
+                    break  # Exit the loop if successful
+                else:
+                    print("预约方案初始化失败，重试中...")
+                    attempts += 1
             else:
                 print("预约方案初始化失败")
                 self.exit()
+    
         return state
 
     def planParser(self, plan:list):

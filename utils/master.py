@@ -24,6 +24,7 @@ class Master:
             '4':'讨论室'
         }
         self.rooms = None
+        self.seats_query_flag = False
     
     def init(self, configFile):
         self.loadConfig(configFile)
@@ -69,7 +70,7 @@ class Master:
             self.job["maxTrials"] = 1  # default max trials
         else:
             self.job["maxTrials"] = int(env_max_trials)
-        if env_delay is None or env_delay == '' or int(env_delay) < 2:
+        if env_delay is None or env_delay == '' or int(env_delay) > 10 or int(env_delay) < 1:
             self.job["delay"] = 2   # default delay
         else:
             self.job["delay"] = int(env_delay)
@@ -113,27 +114,62 @@ class Master:
         self.session.verify = self.sessionCfg['verify']
         self.session.params = self.sessionCfg['params']
     
+    def do_query(self,method:str ='GET',url:str=None,params=None,data=None,toJson:bool=False):
+        try:
+            if method=='GET':
+                res = self.session.get(url=url, params=params)
+            elif method=='POST' and data is not None:
+                res = self.session.post(url=url, data=data)
+            else:
+                print('method should be GET or POST')
+            if res is None:
+                raise Exception('返回体为空')
+            if res.status_code not in [200, 302]:
+                print(f"请求失败，状态码错误，status_code={res.status_code}")
+                return None
+            if toJson:
+                return self._2json(res)
+            return res
+        except Exception as e:
+            print(f"请求失败，错误信息{e}")
+            return None
+    
+
+    def _2json(self, res):
+        try:
+            if res is not None:
+                _json = res.json()
+                return _json
+        except Exception as e:
+            print(f"JSON 解析失败，错误信息{e}")
+            return None
+    
     def login(self):
         url = self.urls["login"]
-        loginRes = self.session.post(url=url, data=self.userInfo)
-        if loginRes.status_code != 200:
-            print(f"登录失败，错误代码{loginRes.status_code}")
+        loginRes = self.do_query(method='POST',url=url,data=self.userInfo,toJson=True)
+        if loginRes is None:
+            print(f"登录失败")
             return False
-        _json=loginRes.json()
-        if _json["CODE"] == "ok":
-            self.uid = _json["DATA"]["uid"]
-            self.name = _json["DATA"]["user_info"]["name"]
-        return _json["CODE"] == "ok"
+        
+        if loginRes["CODE"] == "ok":
+            self.uid = loginRes["DATA"]["uid"]
+            self.name = loginRes["DATA"]["user_info"]["name"]
+        return loginRes["CODE"] == "ok"
 
     def __queryRooms(self):
         # 查询所有可用的房间类型，返回一个字典，键为房间名，值为房间对应的请求参数
         url = self.urls["query_rooms"]
-        queryRoomsRes = self.session.get(url=url).json()
+        queryRoomsRes = self.do_query(method='GET',url=url,toJson=True)
+        if queryRoomsRes is None:
+            return None
         rawRooms = queryRoomsRes["content"]["children"][1]["defaultItems"]
         rooms = {x["name"]: unquote(x["link"]["url"]).split('?')[1] for x in rawRooms}
         for room in rooms.keys():
-            rooms[room] = self.session.get(url=self.urls["query_seats"] + "?" + rooms[room]).json()["data"]
-            sleep(self.job["delay"]) # minimal interval is unknown
+            _room = self.do_query(method='GET',url=self.urls["query_seats"] + "?" + rooms[room],toJson=True)["data"]
+            if _room is None:
+                return None
+            rooms[room] = _room
+            sleep(self.job["delay"]) 
         return rooms
     
     def __querySeats(self):
@@ -151,11 +187,17 @@ class Master:
                 "space_category[category_id]": self.rooms[room]["space_category"]["category_id"],
                 "space_category[content_id]": self.rooms[room]["space_category"]["content_id"],
             }
-            resp = self.session.post(url=self.urls["query_seats"], data=data).json()
+            resp = self.do_query(method='POST',url=self.urls["query_seats"],data=data,toJson=True)
+            if resp is None:
+                self.__queryRooms()
+            if self.seats_query_flag:
+                return
             self.rooms[room]["floors"] = {x["roomName"]:x for x in resp["allContent"]["children"][2]["children"]["children"]}
             for floor in self.rooms[room]["floors"].keys():
                 self.rooms[room]["floors"][floor]["seats"] = self.rooms[room]["floors"][floor]["seatMap"]["POIs"]
+            self.seats_query_flag = True
             sleep(self.job["delay"])
+            
     def updateRooms(self):
         self.rooms = self.__queryRooms()
         self.__querySeats()
@@ -214,12 +256,11 @@ class Master:
             data = self.plan2data(plan)
             url = self.urls["book_seat"]
             
-            _g=f"post&/Seat/Index/bookSeats?LAB_JSON=1&api_time{str(data['api_time'])}&beginTime{str(data['beginTime'])}&duration{str(data['duration'])}&is_recommend{str(data['is_recommend'])}&seatBookers[0]{str(data['seatBookers[0]'])}&seats[0]{str(data['seats[0]'])}"
-            md5=hashlib.md5(_g.encode('utf-8')).hexdigest()
-            str_g=base64.b64encode(md5.encode('utf-8')).decode('utf-8')
-            self.session.headers["Api-Token"]=str_g
-
-            res = self.session.post(url=url, data=data).json()
+            _g = f"post&/Seat/Index/bookSeats?LAB_JSON=1&api_time{str(data['api_time'])}&beginTime{str(data['beginTime'])}&duration{str(data['duration'])}&is_recommend{str(data['is_recommend'])}&seatBookers[0]{str(data['seatBookers[0]'])}&seats[0]{str(data['seats[0]'])}"
+            md5 = hashlib.md5(_g.encode('utf-8')).hexdigest()
+            str_g = base64.b64encode(md5.encode('utf-8')).decode('utf-8')
+            self.session.headers["Api-Token"] = str_g
+            res = self.do_query(method='POST',url=url,data=data,toJson=True)
             return res
 
 if __name__ == "__main__":
